@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+*.egg-info/
+dist/
+build/
+
+# TypeScript / Node
+node_modules/
+dist/
+*.js
+*.js.map
+*.d.ts
+!graphs/typescript/src/**/*.ts
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LangGraph
+.langgraph/
+.langgraph-data/

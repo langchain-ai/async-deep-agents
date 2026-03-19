@@ -1,0 +1,8 @@
+{
+  "dependencies": ["./graphs/typescript"],
+  "graphs": {
+    "agent": "./graphs/typescript/src/agent.ts:graph",
+    "researcher": "./graphs/typescript/src/researcher.ts:graph",
+    "coder": "./graphs/typescript/src/coder.ts:graph"
+  }
+}

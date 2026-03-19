@@ -1,0 +1,9 @@
+{
+  "python_version": "3.12",
+  "dependencies": ["./graphs/python"],
+  "graphs": {
+    "agent": "./graphs/python/src/agent.py:graph",
+    "researcher": "./graphs/python/src/researcher.py:graph",
+    "coder": "./graphs/python/src/coder.py:graph"
+  }
+}
