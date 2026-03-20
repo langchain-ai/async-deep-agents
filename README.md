@@ -30,9 +30,13 @@ Includes working examples in both Python and TypeScript that deploy to Langsmith
   - [Split Deployment](#split-deployment)
   - [Hybrid](#hybrid)
 - [Prompt Engineering](#prompt-engineering)
+- [Completion Notifications](#completion-notifications)
+  - [The Problem: Fire and Forget](#the-problem-fire-and-forget)
+  - [The Solution: Completion Notifier Middleware](#the-solution-completion-notifier-middleware)
+  - [Wiring It Up](#wiring-it-up)
+  - [Why This Is Bring-Your-Own](#why-this-is-bring-your-own)
 - [Production Considerations](#production-considerations)
   - [Worker Concurrency](#worker-concurrency)
-  - [Completion Notifications](#completion-notifications)
   - [Thread Lifecycle Management](#thread-lifecycle-management)
   - [Observability](#observability)
 - [Quick Start](#quick-start)
@@ -369,6 +373,124 @@ The injected prompt addresses each of these by establishing explicit rules:
 - "Job statuses in conversation history are ALWAYS stale"
 - "Always show the full job_id -- never truncate or abbreviate it"
 
+## Completion Notifications
+
+### The Problem: Fire and Forget
+
+The async subagent protocol has a gap: once the supervisor launches a job, there is no built-in mechanism for the subagent to signal that it has finished. The supervisor only learns about completion when it (or the user) explicitly calls `check_async_subagent`.
+
+This creates a polling-dependent workflow:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Supervisor
+    participant Subagent
+
+    Supervisor->>Subagent: launch(task)
+    Subagent-->>Supervisor: job_id
+    Supervisor-->>User: "Launched job abc123"
+
+    Note over Subagent: Working...
+    Note over Subagent: Done!
+
+    Note over User,Subagent: Nobody knows the job finished<br/>until someone asks
+
+    User->>Supervisor: "Is it done yet?"
+    Supervisor->>Subagent: check(abc123)
+    Subagent-->>Supervisor: status: success
+```
+
+For short tasks this is fine. For long-running jobs, it means the user has to keep asking, or the supervisor has to guess when to check.
+
+### The Solution: Completion Notifier Middleware
+
+A **completion notifier** is a middleware added to the subagent's stack that, when the subagent finishes, sends a message back to the supervisor's thread. This wakes the supervisor up and lets it proactively relay results:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Supervisor
+    participant Subagent
+
+    Supervisor->>Subagent: launch(task)
+    Subagent-->>Supervisor: job_id
+    Supervisor-->>User: "Launched job abc123"
+
+    Note over Subagent: Working...
+    Note over Subagent: Done!
+
+    Subagent->>Supervisor: runs.create(parent_thread,<br/>"subagent completed: result...")
+    Note over Supervisor: Wakes up with notification
+
+    Supervisor-->>User: "Job abc123 finished:<br/>here are the results"
+```
+
+The notifier works by calling `runs.create()` on the **supervisor's** thread, which queues a new run with the completion message as input. From the supervisor's perspective, it looks like a new user message arrived -- except the content is a structured notification from the subagent.
+
+This repo includes reference implementations in both languages:
+- **Python**: [`graphs/python/src/middleware/completion_notifier.py`](graphs/python/src/middleware/completion_notifier.py)
+- **TypeScript**: [`graphs/typescript/src/middleware/completionNotifier.ts`](graphs/typescript/src/middleware/completionNotifier.ts)
+
+### Wiring It Up
+
+The notifier needs two pieces of information that only the supervisor has: its **thread ID** and **assistant ID**. These are needed to address the `runs.create()` call back to the right place. How you pass them to the subagent is deployment-specific:
+
+| Approach | How it works | Used by |
+|----------|-------------|---------|
+| **Config-based** | Supervisor passes IDs via `config.configurable` when launching | LangSmith Agent Builder |
+| **Input-based** | Include IDs as metadata in the launch message | Custom deployments |
+| **Store-based** | Write IDs to a shared LangGraph store namespace | Multi-tenant setups |
+
+The examples in this repo use the config-based approach. When the notifier is enabled, each subagent graph switches from a static export to a **dynamic graph factory** that reads the parent IDs from config at startup:
+
+**Python:**
+```python
+@contextlib.asynccontextmanager
+async def graph(config: RunnableConfig):
+    configurable = config.get("configurable", {})
+    notifier = build_completion_notifier(
+        parent_thread_id=configurable.get("parent_thread_id"),
+        parent_assistant_id=configurable.get("parent_assistant_id"),
+        subagent_name="researcher",
+    )
+    yield create_agent(
+        model=model,
+        tools=[...],
+        middleware=[notifier],
+    )
+```
+
+**TypeScript:**
+```typescript
+export async function* graph(config: RunnableConfig) {
+  const notifier = buildCompletionNotifier({
+    parentThreadId: config.configurable?.parentThreadId,
+    parentAssistantId: config.configurable?.parentAssistantId,
+    subagentName: "researcher",
+  });
+  yield createAgent({
+    model,
+    tools: [...],
+    middleware: [notifier],
+  });
+}
+```
+
+Each subagent graph in this repo includes the notifier wiring as commented-out code that you can enable.
+
+### Why This Is Bring-Your-Own
+
+The completion notifier is intentionally **not** part of the `AsyncSubAgentMiddleware` itself. This is a deliberate architectural decision for several reasons:
+
+1. **The middleware runs on the supervisor side.** `AsyncSubAgentMiddleware` provides tools to the supervisor. The notifier runs on the subagent side. These are different graphs, potentially in different deployments, with different middleware stacks.
+
+2. **Parent context passing is deployment-specific.** The notifier needs the supervisor's thread and assistant IDs, but how those get to the subagent depends on your infrastructure. LangSmith Agent Builder uses `config.configurable`; your deployment might use input metadata, a shared store, or environment variables.
+
+3. **Not all deployments need it.** For short-lived subagent tasks, polling via `check` is fine. The notifier adds a reverse dependency (subagent → supervisor) that may not be appropriate for all architectures, especially split deployments where the subagent may not have network access back to the supervisor.
+
+4. **Error handling is application-specific.** The reference implementation notifies on both success and error. You may want different behavior: retry on error, notify a monitoring system, update an external database, etc.
+
 ## Production Considerations
 
 ### Worker Concurrency
@@ -380,23 +502,6 @@ langgraph dev --n-jobs-per-worker 20
 ```
 
 A supervisor with 3 concurrent subagent jobs requires 4 worker slots (1 supervisor + 3 subagents). Under-provisioning causes subagent launches to queue until a slot frees up.
-
-### Completion Notifications
-
-By default, the supervisor only learns about subagent completion when the user (or the supervisor itself) calls `check`. For a more proactive experience, subagent graphs can include a **completion notifier** middleware that sends a message to the supervisor's thread when the subagent finishes:
-
-```python
-@after_agent
-async def notify_parent_on_completion(state, runtime):
-    client = get_loopback_client()
-    await client.runs.create(
-        thread_id=parent_thread_id,
-        assistant_id=parent_assistant_id,
-        input={"messages": [{"role": "user", "content": notification}]},
-    )
-```
-
-This wakes the supervisor and allows it to proactively relay results, similar to how a human project manager might notice a Slack notification from a team member. This pattern is used in LangSmith's Agent Builder.
 
 ### Thread Lifecycle Management
 
@@ -466,19 +571,23 @@ async-subagents/
 │
 ├── graphs/
 │   ├── python/
-│   │   ├── pyproject.toml    # Dependencies: deepagents, langchain, langgraph
+│   │   ├── pyproject.toml                    # Dependencies: deepagents, langchain, langgraph
 │   │   └── src/
-│   │       ├── supervisor.py # create_deep_agent + AsyncSubAgentMiddleware
-│   │       ├── researcher.py # create_agent with research tools
-│   │       └── coder.py      # create_agent with code tools
+│   │       ├── agent.py                      # create_deep_agent + AsyncSubAgentMiddleware
+│   │       ├── researcher.py                 # create_agent with research tools
+│   │       ├── coder.py                      # create_agent with code tools
+│   │       └── middleware/
+│   │           └── completion_notifier.py    # BYO: push notifications to supervisor
 │   │
 │   └── typescript/
-│       ├── package.json      # Dependencies: deepagents, @langchain/langgraph-sdk
+│       ├── package.json                      # Dependencies: deepagents, @langchain/langgraph-sdk
 │       ├── tsconfig.json
 │       └── src/
-│           ├── supervisor.ts # createDeepAgent + createAsyncSubagentMiddleware
-│           ├── researcher.ts # createAgent with research tools
-│           └── coder.ts      # createAgent with code tools
+│           ├── agent.ts                      # createDeepAgent + createAsyncSubagentMiddleware
+│           ├── researcher.ts                 # createAgent with research tools
+│           ├── coder.ts                      # createAgent with code tools
+│           └── middleware/
+│               └── completionNotifier.ts     # BYO: push notifications to supervisor
 │
 └── docs/
     ├── how-it-works.md       # Protocol sequence diagrams

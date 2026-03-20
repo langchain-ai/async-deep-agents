@@ -6,6 +6,12 @@ background job and checks on it later.
 
 When deployed via `langgraph.json`, this graph is addressable by its graph ID
 ("researcher") and the supervisor reaches it via ASGI transport.
+
+## Completion notifications
+
+By default, the supervisor only learns about completion when it calls
+`check_async_subagent`. To enable push notifications, uncomment the
+completion notifier wiring below. See `completion_notifier.py` for details.
 """
 
 from __future__ import annotations
@@ -13,6 +19,10 @@ from __future__ import annotations
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
+
+# Uncomment to enable completion notifications:
+# from langchain_core.runnables import RunnableConfig
+# from middleware.completion_notifier import build_completion_notifier
 
 SYSTEM_PROMPT = """\
 You are a research agent specializing in information gathering and analysis.
@@ -66,9 +76,38 @@ def summarize_findings(content: str, format: str = "bullet_points") -> str:
 
 model = ChatAnthropic(model="claude-sonnet-4-6-20250514")
 
+
+# --- Static graph (no completion notifications) ---
+
 graph = create_agent(
     model=model,
     tools=[analyze_topic, summarize_findings],
     system_prompt=SYSTEM_PROMPT,
     name="researcher",
 )
+
+
+# --- Dynamic graph factory with completion notifications ---
+# Uncomment this block and comment out the static `graph` above to enable
+# push notifications back to the supervisor when this subagent finishes.
+#
+# import contextlib
+# from langchain_core.runnables import RunnableConfig
+# from middleware.completion_notifier import build_completion_notifier
+#
+# @contextlib.asynccontextmanager
+# async def graph(config: RunnableConfig):
+#     """Graph factory that wires up the completion notifier from config."""
+#     configurable = config.get("configurable", {})
+#     notifier = build_completion_notifier(
+#         parent_thread_id=configurable.get("parent_thread_id"),
+#         parent_assistant_id=configurable.get("parent_assistant_id"),
+#         subagent_name="researcher",
+#     )
+#     yield create_agent(
+#         model=model,
+#         tools=[analyze_topic, summarize_findings],
+#         system_prompt=SYSTEM_PROMPT,
+#         middleware=[notifier],
+#         name="researcher",
+#     )

@@ -7,6 +7,12 @@
  *
  * When deployed via `langgraph.ts.json`, this graph is addressable by its
  * graph ID ("researcher") and the supervisor reaches it via ASGI transport.
+ *
+ * ## Completion notifications
+ *
+ * By default, the supervisor only learns about completion when it calls
+ * `check_async_subagent`. To enable push notifications, see the commented-out
+ * graph factory at the bottom of this file and `completion_notifier.ts`.
  */
 
 import { ChatAnthropic } from "@langchain/anthropic";
@@ -79,9 +85,34 @@ const model = new ChatAnthropic({
   model: "claude-sonnet-4-6-20250514",
 });
 
+// --- Static graph (no completion notifications) ---
+
 export const graph = createAgent({
   model,
   tools: [analyzeTopic, summarizeFindings],
   systemPrompt: SYSTEM_PROMPT,
   name: "researcher",
 });
+
+// --- Dynamic graph factory with completion notifications ---
+// Uncomment this block and comment out the static `graph` above to enable
+// push notifications back to the supervisor when this subagent finishes.
+//
+// import { type RunnableConfig } from "@langchain/core/runnables";
+// import { buildCompletionNotifier } from "./middleware/completionNotifier.js";
+//
+// export async function* graph(config: RunnableConfig) {
+//   const configurable = (config as any).configurable ?? {};
+//   const notifier = buildCompletionNotifier({
+//     parentThreadId: configurable.parentThreadId,
+//     parentAssistantId: configurable.parentAssistantId,
+//     subagentName: "researcher",
+//   });
+//   yield createAgent({
+//     model,
+//     tools: [analyzeTopic, summarizeFindings],
+//     systemPrompt: SYSTEM_PROMPT,
+//     middleware: [notifier],
+//     name: "researcher",
+//   });
+// }

@@ -6,6 +6,12 @@ background job and checks on it later.
 
 When deployed via `langgraph.json`, this graph is addressable by its graph ID
 ("coder") and the supervisor reaches it via ASGI transport.
+
+## Completion notifications
+
+By default, the supervisor only learns about completion when it calls
+`check_async_subagent`. To enable push notifications, uncomment the
+completion notifier wiring below. See `completion_notifier.py` for details.
 """
 
 from __future__ import annotations
@@ -72,9 +78,38 @@ def generate_tests(code: str, language: str, framework: str = "auto") -> str:
 
 model = ChatAnthropic(model="claude-sonnet-4-6-20250514")
 
+
+# --- Static graph (no completion notifications) ---
+
 graph = create_agent(
     model=model,
     tools=[run_code_check, generate_tests],
     system_prompt=SYSTEM_PROMPT,
     name="coder",
 )
+
+
+# --- Dynamic graph factory with completion notifications ---
+# Uncomment this block and comment out the static `graph` above to enable
+# push notifications back to the supervisor when this subagent finishes.
+#
+# import contextlib
+# from langchain_core.runnables import RunnableConfig
+# from middleware.completion_notifier import build_completion_notifier
+#
+# @contextlib.asynccontextmanager
+# async def graph(config: RunnableConfig):
+#     """Graph factory that wires up the completion notifier from config."""
+#     configurable = config.get("configurable", {})
+#     notifier = build_completion_notifier(
+#         parent_thread_id=configurable.get("parent_thread_id"),
+#         parent_assistant_id=configurable.get("parent_assistant_id"),
+#         subagent_name="coder",
+#     )
+#     yield create_agent(
+#         model=model,
+#         tools=[run_code_check, generate_tests],
+#         system_prompt=SYSTEM_PROMPT,
+#         middleware=[notifier],
+#         name="coder",
+#     )

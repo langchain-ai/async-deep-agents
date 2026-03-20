@@ -147,6 +147,52 @@ When `url` is omitted from a subagent spec, the LangGraph SDK uses ASGI transpor
 
 This is the recommended setup for co-deployed graphs and the default in this repo.
 
+## Completion Notifier Protocol
+
+The async subagent protocol is inherently fire-and-forget: the supervisor launches a job and has no way to learn it finished until someone calls `check`. The **completion notifier** is an optional middleware on the subagent side that closes this gap.
+
+### How it works
+
+```mermaid
+sequenceDiagram
+    participant S as Supervisor
+    participant P as LangGraph Platform
+    participant A as Subagent
+
+    S->>P: launch(task)
+    P->>A: runs.create(subagent_thread, ...)
+    P-->>S: job_id
+
+    Note over A: Working...
+    Note over A: Run completes
+
+    A->>P: runs.create(supervisor_thread,<br/>supervisor_assistant,<br/>"subagent completed: ...")
+    Note over S: New run queued on<br/>supervisor's thread
+
+    S-->>S: Wakes up, sees notification
+```
+
+The notifier calls `runs.create()` on the **supervisor's** thread and assistant ID. This queues a new run on the supervisor, which processes the notification as if it were a new user message.
+
+### What the notifier needs
+
+| Parameter | What | Where it comes from |
+|-----------|------|---------------------|
+| `parent_thread_id` | Supervisor's thread ID | Passed at launch via config/input/store |
+| `parent_assistant_id` | Supervisor's assistant ID | Passed at launch via config/input/store |
+| `subagent_name` | Identifier for the notification message | Set at graph creation time |
+
+### Hooks
+
+The notifier fires on two middleware hooks:
+
+- **After agent** (`afterAgent` in TS, `aafter_agent` in Python): Fires when the subagent run completes successfully. Extracts the last message as a summary and sends it to the supervisor.
+- **Wrap model call** (`wrapModelCall` in TS, `awrap_model_call` in Python): Wraps every model invocation to catch exceptions. Sends an error notification to the supervisor before re-raising.
+
+### Why it's not built-in
+
+See the [README's Completion Notifications section](../README.md#completion-notifications) for the full rationale. In short: the notifier runs on the subagent side (not the middleware side), requires deployment-specific context passing, and not all architectures need it.
+
 ## System Prompt Injection
 
 The middleware appends instructions to the supervisor's system prompt explaining:
