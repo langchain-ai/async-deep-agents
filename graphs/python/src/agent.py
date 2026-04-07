@@ -12,8 +12,13 @@ supervisor, no external networking required.
 
 from __future__ import annotations
 
+import inspect
+import os
+
 from deepagents import AsyncSubAgent, create_deep_agent
 from langchain_anthropic import ChatAnthropic
+
+from middleware.max_concurrent_async_tasks import MaxConcurrentAsyncTasksMiddleware
 
 SYSTEM_PROMPT = """\
 ## How to work:
@@ -25,8 +30,9 @@ SYSTEM_PROMPT = """\
 
 ## Important:
 - Always launch subagents for non-trivial tasks rather than trying to do everything yourself
-- You can launch multiple subagents simultaneously for independent tasks
+- You can launch multiple subagents in parallel when needed, up to the deployment's concurrent job limit
 - After launching, return control to the user -- don't auto-check status
+- If a launch is refused due to too many running jobs, tell the user and offer to check status or cancel tasks
 """
 
 # Subagent specs -- url is omitted for ASGI transport (same deployment)
@@ -53,8 +59,24 @@ ASYNC_SUBAGENTS: list[AsyncSubAgent] = [
 
 model = ChatAnthropic(model="claude-sonnet-4-6-20250514")
 
+_max_raw = os.environ.get("MAX_CONCURRENT_ASYNC_TASKS")
+_max_concurrent = int(_max_raw) if _max_raw else None
+
+_concurrency_mw = MaxConcurrentAsyncTasksMiddleware(
+    max_concurrent=_max_concurrent,
+)
+
+# deepagents uses ``subagents`` (mixed sync + async specs); older builds used ``async_subagents``.
+_ca_sig = inspect.signature(create_deep_agent)
+_subagent_kw = (
+    "subagents"
+    if "subagents" in _ca_sig.parameters
+    else "async_subagents"
+)
+
 graph = create_deep_agent(
     model=model,
     system_prompt=SYSTEM_PROMPT,
-    async_subagents=ASYNC_SUBAGENTS,
+    middleware=[_concurrency_mw],
+    **{_subagent_kw: ASYNC_SUBAGENTS},
 )
