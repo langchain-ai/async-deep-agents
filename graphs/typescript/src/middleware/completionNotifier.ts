@@ -137,7 +137,7 @@ export function buildCompletionNotifier(options: {
       await sendNotification(
         `[Async subagent '${subagentName}' has completed] Result: ${summary}`,
       );
-      return null;
+      return undefined;
     },
 
     wrapModelCall: async (request, handler) => {

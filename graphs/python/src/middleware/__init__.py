@@ -1,9 +1,1 @@
-from .completion_notifier import (
-    CompletionNotifierMiddleware,
-    build_completion_notifier,
-)
-
-__all__ = [
-    "CompletionNotifierMiddleware",
-    "build_completion_notifier",
-]
+"""Supervisor and subagent middleware (import submodules directly, e.g. ``completion_notifier``)."""
